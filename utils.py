@@ -2,6 +2,7 @@
 import re
 import unicodedata
 
+
 def normalize(s: str) -> str:
     """Lowercase, remove accents/punctuation, collapse whitespace."""
     s = unicodedata.normalize("NFKD", s)
@@ -58,3 +59,69 @@ def jaro_winkler(s1: str, s2: str, p: float = 0.1) -> float:
         else:
             break
     return jaro + prefix * p * (1 - jaro)
+
+
+def levenshtein_similarity(s1: str, s2: str) -> float:
+    """Normalized Levenshtein similarity: 1 - (edit_distance / max_length).
+
+    Calibrated thresholds for OFAC use: BLOCKED ≥ 0.85, REVIEW ≥ 0.75.
+    """
+    if s1 == s2:
+        return 1.0
+    len1, len2 = len(s1), len(s2)
+    if len1 == 0 or len2 == 0:
+        return 0.0
+
+    prev = list(range(len2 + 1))
+    for i, c1 in enumerate(s1, 1):
+        curr = [i] + [0] * len2
+        for j, c2 in enumerate(s2, 1):
+            if c1 == c2:
+                curr[j] = prev[j - 1]
+            else:
+                curr[j] = 1 + min(prev[j], curr[j - 1], prev[j - 1])
+        prev = curr
+
+    return 1.0 - prev[len2] / max(len1, len2)
+
+
+def ngram_similarity(s1: str, s2: str, n: int = 2) -> float:
+    """Bigram Dice coefficient over character n-grams.
+
+    Robust to transliterations and spelling variants across languages.
+    Calibrated thresholds for OFAC use: BLOCKED ≥ 0.75, REVIEW ≥ 0.65.
+    """
+    if s1 == s2:
+        return 1.0
+
+    def _counts(s: str) -> dict:
+        counts: dict[str, int] = {}
+        for i in range(len(s) - n + 1):
+            g = s[i:i + n]
+            counts[g] = counts.get(g, 0) + 1
+        return counts
+
+    if len(s1) < n or len(s2) < n:
+        # Short-string fallback: character-set overlap (Dice on unigrams)
+        chars1 = set(s1)
+        chars2 = set(s2)
+        denom = len(chars1) + len(chars2)
+        return 2 * len(chars1 & chars2) / denom if denom else 0.0
+
+    c1, c2 = _counts(s1), _counts(s2)
+    intersection = sum(min(c1.get(g, 0), c2.get(g, 0)) for g in c1)
+    total = (len(s1) - n + 1) + (len(s2) - n + 1)
+    return 2 * intersection / total
+
+
+def string_similarity(s1: str, s2: str, algorithm: str = "jaro_winkler") -> float:
+    """Dispatch to the requested similarity algorithm.
+
+    Args:
+        algorithm: one of "jaro_winkler", "levenshtein", "ngram"
+    """
+    if algorithm == "levenshtein":
+        return levenshtein_similarity(s1, s2)
+    if algorithm == "ngram":
+        return ngram_similarity(s1, s2)
+    return jaro_winkler(s1, s2)

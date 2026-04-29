@@ -18,6 +18,12 @@ class EntityType(str, Enum):
     ENTITY      = "entity"
 
 
+class AlgorithmType(str, Enum):
+    JARO_WINKLER = "jaro_winkler"  # Default; prefix-weighted character similarity
+    LEVENSHTEIN  = "levenshtein"   # Normalized edit distance
+    NGRAM        = "ngram"         # Bigram Dice coefficient; good for transliterations
+
+
 class Address(BaseModel):
     street:  Optional[str] = None
     city:    Optional[str] = None
@@ -34,6 +40,10 @@ class ScreeningRequest(BaseModel):
     national_id:  Optional[str] = Field(None, description="Passport, SSN, or government-issued ID number")
     address:      Optional[Address] = None
     reference_id: Optional[str] = Field(None, description="Your internal transaction / customer reference")
+    algorithm:    AlgorithmType = Field(
+        AlgorithmType.JARO_WINKLER,
+        description="String similarity algorithm to use. Thresholds are pre-calibrated per algorithm.",
+    )
 
     @field_validator("full_name")
     @classmethod
@@ -47,7 +57,7 @@ class MatchDetail(BaseModel):
     sdn_name:     str
     sdn_type:     str
     sdn_program:  str
-    score:        float = Field(..., description="Jaro-Winkler similarity score 0–1")
+    score:        float = Field(..., description="String similarity score 0–1 (algorithm-dependent)")
     match_reason: str
 
 
@@ -59,6 +69,7 @@ class ScreeningResponse(BaseModel):
     score:        float  = Field(..., description="Highest match score found (0–1)")
     matches:      list[MatchDetail]
     message:      str
+    algorithm:    AlgorithmType = Field(..., description="Algorithm used to compute similarity scores")
     sdn_list_date: Optional[str] = Field(None, description="Publication date of the SDN list used")
 
 
