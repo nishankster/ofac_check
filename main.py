@@ -12,7 +12,7 @@ from models import (
     BatchScreeningRequest,
     BatchScreeningResponse,
 )
-from sdn_manager import SDNListManager, MATCH_THRESHOLD, REVIEW_THRESHOLD
+from sdn_manager import SDNListManager, ALGORITHM_THRESHOLDS
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -69,26 +69,32 @@ def screen_identity(req: ScreeningRequest) -> ScreeningResponse:
     """
     Screen a single identity against the OFAC SDN list.
 
-    **Decision logic**:
-    | Highest match score | Decision  |
-    |---------------------|-----------|
-    | ≥ 0.88              | BLOCKED   |
-    | 0.80 – 0.87         | REVIEW    |
-    | < 0.80              | CLEAR     |
+    Use the `algorithm` field to choose the similarity model. Thresholds are
+    pre-calibrated per algorithm so effective sensitivity is consistent.
+
+    **Default algorithm: jaro_winkler**
+
+    | Algorithm     | BLOCKED threshold | REVIEW threshold |
+    |---------------|-------------------|------------------|
+    | jaro_winkler  | ≥ 0.88            | ≥ 0.80           |
+    | levenshtein   | ≥ 0.85            | ≥ 0.75           |
+    | ngram         | ≥ 0.75            | ≥ 0.65           |
     """
+    match_threshold, review_threshold = ALGORITHM_THRESHOLDS[req.algorithm]
+
     matches     = sdn_manager.screen(req)
     top_score   = matches[0].score if matches else 0.0
     request_id  = hashlib.sha256(
         f"{req.full_name}{datetime.utcnow().isoformat()}".encode()
     ).hexdigest()[:16]
 
-    if top_score >= MATCH_THRESHOLD:
+    if top_score >= match_threshold:
         decision = ScreeningDecision.BLOCKED
         message  = (
             f"Identity matches OFAC SDN entry \'{matches[0].sdn_name}\' "
             f"(score {top_score:.2f}). Transaction must be blocked."
         )
-    elif top_score >= REVIEW_THRESHOLD:
+    elif top_score >= review_threshold:
         decision = ScreeningDecision.REVIEW
         message  = (
             f"Possible OFAC SDN match found (score {top_score:.2f}). "
@@ -106,6 +112,7 @@ def screen_identity(req: ScreeningRequest) -> ScreeningResponse:
         score         = round(top_score, 4),
         matches       = matches,
         message       = message,
+        algorithm     = req.algorithm,
         sdn_list_date = sdn_manager.list_date,
     )
 

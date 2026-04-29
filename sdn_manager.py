@@ -6,17 +6,26 @@ from pathlib import Path
 from typing import Optional
 from urllib.request import urlopen, Request
 
-from models import ScreeningRequest, MatchDetail
-from utils import normalize, jaro_winkler
+from models import AlgorithmType, ScreeningRequest, MatchDetail
+from utils import normalize, string_similarity
 
 log = logging.getLogger("ofac_api")
 
 OFAC_SDN_XML_URL = "https://www.treasury.gov/ofac/downloads/sdn.xml"
 SDN_CACHE_PATH = Path("sdn_cache.xml")
 
-# Fuzzy match threshold: Jaro-Winkler score 0–1
-MATCH_THRESHOLD = 0.88       # Positive / Blocked
-REVIEW_THRESHOLD = 0.80      # Manual Review
+# Per-algorithm thresholds: (BLOCKED, REVIEW)
+# Each pair is calibrated so that the effective sensitivity is roughly equivalent
+# across algorithms even though their raw score distributions differ.
+ALGORITHM_THRESHOLDS: dict[AlgorithmType, tuple[float, float]] = {
+    AlgorithmType.JARO_WINKLER: (0.88, 0.80),  # Original calibration
+    AlgorithmType.LEVENSHTEIN:  (0.85, 0.75),  # Edit distance penalises harder; lower cutoffs
+    AlgorithmType.NGRAM:        (0.75, 0.65),  # Bigram Dice scores lower for near-matches
+}
+
+# Convenience aliases kept for callers that reference the Jaro-Winkler defaults directly
+MATCH_THRESHOLD  = ALGORITHM_THRESHOLDS[AlgorithmType.JARO_WINKLER][0]
+REVIEW_THRESHOLD = ALGORITHM_THRESHOLDS[AlgorithmType.JARO_WINKLER][1]
 
 
 class SDNEntry:
@@ -70,6 +79,8 @@ class SDNListManager:
     def screen(self, request: ScreeningRequest) -> list[MatchDetail]:
         self.ensure_loaded()
         query_name = normalize(request.full_name)
+        algorithm = request.algorithm.value
+        _, review_threshold = ALGORITHM_THRESHOLDS[request.algorithm]
         results: list[MatchDetail] = []
 
         for entry in self._entries:
@@ -77,11 +88,11 @@ class SDNListManager:
             candidates = [entry.name] + entry.aliases
             best_score = 0.0
             for candidate in candidates:
-                s = jaro_winkler(query_name, candidate)
+                s = string_similarity(query_name, candidate, algorithm)
                 if s > best_score:
                     best_score = s
 
-            if best_score < REVIEW_THRESHOLD:
+            if best_score < review_threshold:
                 # Fast-path: skip weak candidates entirely
                 # but still check national ID if provided
                 if request.national_id and entry.ids:
