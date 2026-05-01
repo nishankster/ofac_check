@@ -16,9 +16,15 @@ The OFAC Screening API is a high-performance RESTful web service built with Fast
 
 ## Authentication
 
-All endpoints except `GET /health` require a **JWT Bearer token**.
+All endpoints except `GET /health` require a **JWT Bearer token**. The token flow is:
 
-### Step 1 — Obtain a token
+```
+Your API key  →  POST /auth/token  →  JWT (valid 60 min)  →  Authorization: Bearer <JWT>
+```
+
+### Step 1 — Obtain a JWT token
+
+Exchange your static API key for a short-lived JWT:
 
 ```bash
 curl -X POST https://your-api/auth/token \
@@ -26,24 +32,136 @@ curl -X POST https://your-api/auth/token \
   -d '{"api_key": "your-api-key"}'
 ```
 
+**Success response `200 OK`:**
+
 ```json
 {
-  "access_token": "eyJhbGci...",
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhcGktY2xpZW50IiwiaWF0IjoxNjk4MjQwMDAwLCJleHAiOjE2OTgyNDM2MDB9.abc123",
   "token_type": "bearer",
   "expires_in": 3600
 }
 ```
 
-### Step 2 — Call protected endpoints
+| Field | Description |
+|-------|-------------|
+| `access_token` | The JWT to include in every subsequent request |
+| `token_type` | Always `bearer` |
+| `expires_in` | Seconds until the token expires (default: 3600 = 60 min) |
+
+**Error — invalid API key `401 Unauthorized`:**
+
+```json
+{ "detail": "Invalid API key" }
+```
+
+---
+
+### Step 2 — Call a protected endpoint
+
+Pass the token in the `Authorization` header as a **Bearer token**:
 
 ```bash
+TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
 curl -X POST https://your-api/screen \
-  -H "Authorization: Bearer eyJhbGci..." \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"full_name": "John Doe"}'
 ```
 
-Tokens expire after `JWT_EXPIRE_MINUTES` (default: 60 minutes). Re-request a token when you receive `401 Token has expired`.
+**Error — missing token `401 Unauthorized`:**
+
+```json
+{ "detail": "Not authenticated" }
+```
+
+**Error — expired token `401 Unauthorized`:**
+
+```json
+{ "detail": "Token has expired" }
+```
+
+**Error — malformed token `401 Unauthorized`:**
+
+```json
+{ "detail": "Invalid token" }
+```
+
+---
+
+### Token lifecycle
+
+```
+t=0 min    Request token via POST /auth/token
+t=0 min    Use token on /screen, /screen/batch, /sdn/refresh
+...
+t=59 min   Token still valid — continue using it
+t=60 min   Token expires — any request returns 401 "Token has expired"
+t=60 min   Request a fresh token via POST /auth/token and continue
+```
+
+Re-request a token whenever you receive `401 Token has expired`. There is no refresh endpoint — simply call `/auth/token` again with your API key.
+
+---
+
+### Python example (full round-trip)
+
+```python
+import requests
+
+BASE_URL = "https://your-api"
+API_KEY  = "your-api-key"
+
+# 1. Get a token
+resp = requests.post(f"{BASE_URL}/auth/token", json={"api_key": API_KEY})
+resp.raise_for_status()
+token = resp.json()["access_token"]
+
+headers = {"Authorization": f"Bearer {token}"}
+
+# 2. Screen a single identity
+resp = requests.post(
+    f"{BASE_URL}/screen",
+    headers=headers,
+    json={
+        "full_name": "Osama Bin Laden",
+        "date_of_birth": "1957-03-10",
+        "nationality": "SA",
+    },
+)
+resp.raise_for_status()
+result = resp.json()
+print(result["decision"])   # BLOCKED
+print(result["score"])      # e.g. 0.9712
+print(result["algorithm"])  # jaro_winkler
+
+# 3. Batch screen with a different algorithm
+resp = requests.post(
+    f"{BASE_URL}/screen/batch",
+    headers=headers,
+    json={
+        "subjects": [
+            {"full_name": "Alice Smith",    "reference_id": "ref-001"},
+            {"full_name": "Viktor Bout",    "reference_id": "ref-002", "algorithm": "ngram"},
+        ]
+    },
+)
+resp.raise_for_status()
+for r in resp.json()["results"]:
+    print(r["reference_id"], r["decision"], r["score"])
+```
+
+---
+
+### Using the Swagger UI
+
+The interactive API docs automatically handle the auth flow for you:
+
+1. Open [http://localhost:8000/docs](http://localhost:8000/docs)
+2. Call `POST /auth/token` with your API key — copy the `access_token` from the response
+3. Click **Authorize** (lock icon, top-right)
+4. Enter `Bearer <paste-token-here>` in the **HTTPBearer** field and click **Authorize**
+5. All subsequent requests from the Swagger UI will include the token automatically
 
 ---
 
@@ -185,12 +303,50 @@ Thresholds are pre-calibrated per algorithm so that effective screening sensitiv
 
 ## API Endpoints
 
-### 1. Health Check
-`GET /health`
+| Endpoint | Method | Auth required |
+|----------|--------|---------------|
+| `/health` | GET | No — public (used by ALB health checks) |
+| `/auth/token` | POST | No — this is where you obtain a token |
+| `/screen` | POST | **Yes** — Bearer JWT |
+| `/screen/batch` | POST | **Yes** — Bearer JWT |
+| `/sdn/refresh` | GET | **Yes** — Bearer JWT |
+
+---
+
+### 1. Get Token
+`POST /auth/token` — **Public**
+
+Exchange a static API key for a short-lived JWT Bearer token.
+
+**Request:**
+```bash
+curl -X POST https://your-api/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"api_key": "your-api-key"}'
+```
+
+**Response `200 OK`:**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "bearer",
+  "expires_in": 3600
+}
+```
+
+---
+
+### 2. Health Check
+`GET /health` — **Public**
 
 Returns the system health, including the current count of loaded SDN entries and the publication date of the list in use.
 
-**Response Example:**
+**Request:**
+```bash
+curl https://your-api/health
+```
+
+**Response `200 OK`:**
 ```json
 {
   "status": "ok",
@@ -200,44 +356,37 @@ Returns the system health, including the current count of loaded SDN entries and
 }
 ```
 
-### 2. Refresh SDN List
-`GET /sdn/refresh`
-
-Triggers a background task to re-download and parse the latest OFAC SDN list.
-
-**Response Example:**
-```json
-{
-  "message": "SDN list refresh initiated in background."
-}
-```
+---
 
 ### 3. Screen Single Identity
-`POST /screen`
+`POST /screen` — **Requires Bearer JWT**
 
 Screens a single identity (individual or entity) against the loaded SDN list.
 
-**Request Body (`ScreeningRequest`):**
-```json
-{
-  "full_name": "John Doe",
-  "entity_type": "individual",
-  "date_of_birth": "1980-01-01",
-  "nationality": "US",
-  "national_id": "123456789",
-  "reference_id": "txn-987654321",
-  "algorithm": "jaro_winkler",
-  "address": {
-    "street": "123 Main St",
-    "city": "New York",
-    "state": "NY",
-    "country": "US",
-    "postal_code": "10001"
-  }
-}
+**Request:**
+```bash
+curl -X POST https://your-api/screen \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "full_name": "John Doe",
+    "entity_type": "individual",
+    "date_of_birth": "1980-01-01",
+    "nationality": "US",
+    "national_id": "123456789",
+    "reference_id": "txn-987654321",
+    "algorithm": "jaro_winkler",
+    "address": {
+      "street": "123 Main St",
+      "city": "New York",
+      "state": "NY",
+      "country": "US",
+      "postal_code": "10001"
+    }
+  }'
 ```
 
-**Response Body (`ScreeningResponse`):**
+**Response `200 OK`:**
 ```json
 {
   "request_id": "a1b2c3d4e5f6g7h8",
@@ -252,30 +401,58 @@ Screens a single identity (individual or entity) against the loaded SDN list.
 }
 ```
 
-### 4. Batch Screening
-`POST /screen/batch`
-
-Screens multiple subjects in a single request (maximum 100 subjects). Each subject is screened independently and may use a different algorithm.
-
-**Request Body (`BatchScreeningRequest`):**
+**Response when a match is found:**
 ```json
 {
-  "subjects": [
+  "request_id": "b2c3d4e5f6g7h8i9",
+  "reference_id": "txn-111222333",
+  "screened_at": "2023-10-25T14:36:00.123Z",
+  "decision": "BLOCKED",
+  "score": 0.9712,
+  "matches": [
     {
-      "full_name": "Alice Smith",
-      "reference_id": "ref-001",
-      "algorithm": "jaro_winkler"
-    },
-    {
-      "full_name": "Bob Jones",
-      "reference_id": "ref-002",
-      "algorithm": "ngram"
+      "sdn_name": "osama bin laden",
+      "sdn_type": "Individual",
+      "sdn_program": "SDGT",
+      "score": 0.9712,
+      "match_reason": "Name similarity 0.97"
     }
-  ]
+  ],
+  "message": "Identity matches OFAC SDN entry 'osama bin laden' (score 0.97). Transaction must be blocked.",
+  "algorithm": "jaro_winkler",
+  "sdn_list_date": "10/18/2023"
 }
 ```
 
-**Response Body (`BatchScreeningResponse`):**
+---
+
+### 4. Batch Screening
+`POST /screen/batch` — **Requires Bearer JWT**
+
+Screens up to 100 subjects in a single request. Each subject is screened independently and may specify a different algorithm.
+
+**Request:**
+```bash
+curl -X POST https://your-api/screen/batch \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subjects": [
+      {
+        "full_name": "Alice Smith",
+        "reference_id": "ref-001",
+        "algorithm": "jaro_winkler"
+      },
+      {
+        "full_name": "Bob Jones",
+        "reference_id": "ref-002",
+        "algorithm": "ngram"
+      }
+    ]
+  }'
+```
+
+**Response `200 OK`:**
 ```json
 {
   "screened_at": "2023-10-25T14:40:00.123Z",
@@ -304,6 +481,26 @@ Screens multiple subjects in a single request (maximum 100 subjects). Each subje
       "sdn_list_date": "10/18/2023"
     }
   ]
+}
+```
+
+---
+
+### 5. Refresh SDN List
+`GET /sdn/refresh` — **Requires Bearer JWT**
+
+Triggers a background task to re-download and parse the latest OFAC SDN list from the Treasury website. Returns immediately; the reload happens asynchronously.
+
+**Request:**
+```bash
+curl -X GET https://your-api/sdn/refresh \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Response `200 OK`:**
+```json
+{
+  "message": "SDN list refresh initiated in background."
 }
 ```
 
