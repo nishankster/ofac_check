@@ -6,9 +6,136 @@ The OFAC Screening API is a high-performance RESTful web service built with Fast
 
 - **Automated SDN List Management**: Automatically downloads and parses the latest OFAC SDN XML list.
 - **Pluggable Similarity Algorithms**: Choose between Jaro-Winkler, Levenshtein, or N-gram similarity per request. Each algorithm ships with pre-calibrated thresholds so screening sensitivity stays consistent regardless of choice.
+- **JWT Authentication**: All screening endpoints are protected by short-lived JWT Bearer tokens. Clients exchange a static API key for a token via `POST /auth/token`.
 - **Detailed Match Reasons**: Identifies matches not only by name but also by Date of Birth (DOB), Nationality, and National IDs (e.g., Passport, SSN).
 - **Batch Processing**: Supports screening up to 100 identities in a single request.
 - **Background Refresh**: Exposes an endpoint to refresh the SDN list asynchronously without blocking ongoing screening requests.
+- **Containerized & Cloud-Ready**: Ships with a production Dockerfile, docker-compose for local development, and a complete AWS ECS Fargate deployment (CloudFormation + deploy script).
+
+---
+
+## Authentication
+
+All endpoints except `GET /health` require a **JWT Bearer token**.
+
+### Step 1 — Obtain a token
+
+```bash
+curl -X POST https://your-api/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"api_key": "your-api-key"}'
+```
+
+```json
+{
+  "access_token": "eyJhbGci...",
+  "token_type": "bearer",
+  "expires_in": 3600
+}
+```
+
+### Step 2 — Call protected endpoints
+
+```bash
+curl -X POST https://your-api/screen \
+  -H "Authorization: Bearer eyJhbGci..." \
+  -H "Content-Type: application/json" \
+  -d '{"full_name": "John Doe"}'
+```
+
+Tokens expire after `JWT_EXPIRE_MINUTES` (default: 60 minutes). Re-request a token when you receive `401 Token has expired`.
+
+---
+
+## Running Locally with Docker
+
+```bash
+# 1. Create your local env file
+cp .env.example .env
+# Edit .env — set JWT_SECRET_KEY (openssl rand -hex 32) and API_KEYS
+
+# 2. Build and start
+docker compose up --build
+
+# 3. Check health
+curl http://localhost:8000/health
+
+# 4. Get a token
+curl -X POST http://localhost:8000/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"api_key": "your-key-from-env"}'
+
+# 5. Screen an identity
+curl -X POST http://localhost:8000/screen \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"full_name": "Osama Bin Laden"}'
+```
+
+---
+
+## AWS ECS Deployment
+
+### Prerequisites
+
+- AWS CLI v2 configured (`aws configure`)
+- Docker installed
+- An existing VPC with public and private subnets
+
+### 1. Deploy the CloudFormation stack
+
+```bash
+# Create the secrets in Secrets Manager first
+aws secretsmanager create-secret \
+  --name ofac-api/jwt-secret-key \
+  --secret-string "$(openssl rand -hex 32)"
+
+aws secretsmanager create-secret \
+  --name ofac-api/api-keys \
+  --secret-string "key-abc123,key-def456"
+
+# Deploy the stack (replace parameter values for your environment)
+aws cloudformation deploy \
+  --template-file deploy/cloudformation.yml \
+  --stack-name ofac-api-production \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+      EnvironmentName=production \
+      VpcId=vpc-xxxxxxxx \
+      PublicSubnetIds="subnet-aaa,subnet-bbb" \
+      PrivateSubnetIds="subnet-ccc,subnet-ddd" \
+      JwtSecretArn=arn:aws:secretsmanager:REGION:ACCOUNT:secret:ofac-api/jwt-secret-key \
+      ApiKeysSecretArn=arn:aws:secretsmanager:REGION:ACCOUNT:secret:ofac-api/api-keys \
+      ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/ofac-screening-api:latest
+```
+
+### 2. Build, push, and deploy
+
+```bash
+./deploy/deploy.sh --env production --region us-east-1
+```
+
+The script:
+1. Authenticates Docker to ECR
+2. Builds the image for `linux/amd64`
+3. Pushes to ECR
+4. Triggers an ECS rolling deployment with zero-downtime
+
+### Architecture
+
+```
+Internet → ALB (HTTP→HTTPS redirect) → ECS Fargate tasks (private subnets)
+                                        ↕
+                              AWS Secrets Manager (JWT key, API keys)
+                                        ↕
+                              CloudWatch Logs (/ecs/ofac-screening-api)
+```
+
+- **Fargate** — serverless containers, no EC2 management
+- **Auto Scaling** — scales 2→10 tasks on CPU > 70%
+- **Deployment circuit breaker** — automatically rolls back failed deployments
+- **Secrets Manager** — JWT secret key and API keys injected as env vars at runtime (never baked into the image)
+- **Health check grace period** — 120 s to allow the SDN XML to download on cold start
 
 ---
 
@@ -222,21 +349,17 @@ When a match is found above the review threshold, it is returned in the `matches
 
 ---
 
-## Setup and Running Locally
+## Running Without Docker (bare Python)
 
-1. **Install Dependencies**
-   Ensure you have Python installed, then install FastAPI and its dependencies.
-   ```bash
-   pip install fastapi pydantic uvicorn
-   ```
+```bash
+pip install -r requirements.txt
 
-2. **Run the API**
-   Start the application using `uvicorn`. On startup, it will download and cache the OFAC SDN XML list.
-   ```bash
-   uvicorn main:app --reload
-   ```
+export JWT_SECRET_KEY="$(openssl rand -hex 32)"
+export API_KEYS="dev-key-1"
 
-3. **Access API Documentation**
-   FastAPI provides interactive API documentation out of the box. Once running, navigate to:
-   - **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
-   - **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+uvicorn main:app --reload
+```
+
+Once running, the interactive API docs are at:
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
