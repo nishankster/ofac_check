@@ -81,3 +81,13 @@ class BatchScreeningResponse(BaseModel):
     screened_at: datetime
     total:       int
     results:     list[ScreeningResponse]
+
+
+class TokenRequest(BaseModel):
+    api_key: str = Field(..., description="API key issued by your platform administrator")
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type:   str = "bearer"
+    expires_in:   int = Field(..., description="Token validity in seconds")

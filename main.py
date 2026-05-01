@@ -3,14 +3,22 @@ import hashlib
 import logging
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
 
+from auth import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    VALID_API_KEYS,
+    create_access_token,
+    require_auth,
+)
 from models import (
+    BatchScreeningRequest,
+    BatchScreeningResponse,
     ScreeningDecision,
     ScreeningRequest,
     ScreeningResponse,
-    BatchScreeningRequest,
-    BatchScreeningResponse,
+    TokenRequest,
+    TokenResponse,
 )
 from sdn_manager import SDNListManager, ALGORITHM_THRESHOLDS
 
@@ -41,6 +49,24 @@ async def startup_event():
     log.info(f"SDN list ready: {sdn_manager.entry_count:,} entries")
 
 
+# ─── Auth ─────────────────────────────────────────────────────────────────────
+@app.post("/auth/token", response_model=TokenResponse, tags=["Auth"])
+def get_token(req: TokenRequest) -> TokenResponse:
+    """
+    Exchange a static API key for a short-lived JWT Bearer token.
+
+    Pass the returned `access_token` as `Authorization: Bearer <token>` on all
+    protected endpoints (`/screen`, `/screen/batch`, `/sdn/refresh`).
+    """
+    if req.api_key not in VALID_API_KEYS:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    token = create_access_token(subject="api-client")
+    return TokenResponse(
+        access_token=token,
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+
+
 # ─── Health ───────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["System"])
 def health():
@@ -54,7 +80,7 @@ def health():
 
 # ─── Refresh SDN List ─────────────────────────────────────────────────────────
 @app.get("/sdn/refresh", tags=["System"])
-def refresh_sdn(background_tasks: BackgroundTasks):
+def refresh_sdn(background_tasks: BackgroundTasks, _: dict = Depends(require_auth)):
     """Trigger a background re-download and reload of the OFAC SDN list."""
     def _reload():
         sdn_manager.load(force_download=True)
@@ -65,7 +91,7 @@ def refresh_sdn(background_tasks: BackgroundTasks):
 
 # ─── Single Screening ─────────────────────────────────────────────────────────
 @app.post("/screen", response_model=ScreeningResponse, tags=["Screening"])
-def screen_identity(req: ScreeningRequest) -> ScreeningResponse:
+def screen_identity(req: ScreeningRequest, _: dict = Depends(require_auth)) -> ScreeningResponse:
     """
     Screen a single identity against the OFAC SDN list.
 
@@ -119,7 +145,7 @@ def screen_identity(req: ScreeningRequest) -> ScreeningResponse:
 
 # ─── Batch Screening ──────────────────────────────────────────────────────────
 @app.post("/screen/batch", response_model=BatchScreeningResponse, tags=["Screening"])
-def screen_batch(req: BatchScreeningRequest) -> BatchScreeningResponse:
+def screen_batch(req: BatchScreeningRequest, _: dict = Depends(require_auth)) -> BatchScreeningResponse:
     """
     Screen up to 100 identities in a single request.
     Each subject is independently screened and returns its own decision.

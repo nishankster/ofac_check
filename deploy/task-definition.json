@@ -1,0 +1,65 @@
+{
+  "family": "ofac-screening-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ofac-api-execution-role",
+  "taskRoleArn":      "arn:aws:iam::ACCOUNT_ID:role/ofac-api-task-role",
+  "containerDefinitions": [
+    {
+      "name": "ofac-api",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/ofac-screening-api:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "JWT_SECRET_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ofac-api/jwt-secret-key"
+        },
+        {
+          "name": "API_KEYS",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ofac-api/api-keys"
+        }
+      ],
+      "environment": [
+        {
+          "name": "JWT_EXPIRE_MINUTES",
+          "value": "60"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group":         "/ecs/ofac-screening-api",
+          "awslogs-region":        "REGION",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group":  "true"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/health', timeout=8); sys.exit(0 if r.status == 200 else 1)\""
+        ],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 120
+      },
+      "stopTimeout": 30,
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 65536,
+          "hardLimit": 65536
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.env.*
+*.env
+.git/
+.gitignore
+.DS_Store
+sdn_cache.xml
+deploy/
+*.md
+LICENSE

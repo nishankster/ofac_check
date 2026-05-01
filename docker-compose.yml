@@ -1,0 +1,30 @@
+services:
+  ofac-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ofac-screening-api:local
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env          # copy .env.example → .env and fill in values
+    environment:
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
+    volumes:
+      # Persist the downloaded SDN XML across container restarts so you don't
+      # re-download the ~27 MB file every time you restart locally.
+      - sdn-cache:/app
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/health', timeout=8); sys.exit(0 if r.status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+
+volumes:
+  sdn-cache:
