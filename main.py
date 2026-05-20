@@ -3,22 +3,21 @@ import hashlib
 import logging
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
+from fastapi import Depends, FastAPI, Form, HTTPException, BackgroundTasks, status
 
 from auth import (
-    ACCESS_TOKEN_EXPIRE_MINUTES,
-    VALID_API_KEYS,
+    TOKEN_EXPIRE_SECONDS,
+    authenticate_client,
     create_access_token,
     require_auth,
 )
 from models import (
     BatchScreeningRequest,
     BatchScreeningResponse,
+    OAuthTokenResponse,
     ScreeningDecision,
     ScreeningRequest,
     ScreeningResponse,
-    TokenRequest,
-    TokenResponse,
 )
 from sdn_manager import SDNListManager, ALGORITHM_THRESHOLDS
 
@@ -33,9 +32,13 @@ app = FastAPI(
     title="OFAC Screening API",
     description=(
         "Screens individuals and entities against the OFAC Specially Designated "
-        "Nationals (SDN) list. Returns a risk decision: CLEAR, REVIEW, or BLOCKED."
+        "Nationals (SDN) list. Returns a risk decision: CLEAR, REVIEW, or BLOCKED.\n\n"
+        "**Authentication**: OAuth 2.0 Client Credentials (RFC 6749 §4.4).  \n"
+        "Call `POST /oauth/token` with your `client_id` and `client_secret` to obtain "
+        "a Bearer token, then pass it as `Authorization: Bearer <token>` on all "
+        "protected endpoints."
     ),
-    version="1.0.0",
+    version="2.0.0",
     contact={"name": "Compliance Team"},
     license_info={"name": "Internal Use Only"},
 )
@@ -49,21 +52,50 @@ async def startup_event():
     log.info(f"SDN list ready: {sdn_manager.entry_count:,} entries")
 
 
-# ─── Auth ─────────────────────────────────────────────────────────────────────
-@app.post("/auth/token", response_model=TokenResponse, tags=["Auth"])
-def get_token(req: TokenRequest) -> TokenResponse:
+# ─── OAuth 2.0 Token Endpoint ─────────────────────────────────────────────────
+@app.post(
+    "/oauth/token",
+    response_model=OAuthTokenResponse,
+    tags=["Auth"],
+    summary="Obtain an OAuth 2.0 access token (Client Credentials)",
+)
+def oauth_token(
+    grant_type:    str = Form(...,  description="Must be 'client_credentials'"),
+    client_id:     str = Form(...,  description="Your OAuth client ID"),
+    client_secret: str = Form(...,  description="Your OAuth client secret"),
+    scope:         str = Form("ofac:screening", description="Requested scope (default: ofac:screening)"),
+) -> OAuthTokenResponse:
     """
-    Exchange a static API key for a short-lived JWT Bearer token.
+    **OAuth 2.0 Client Credentials token endpoint** (RFC 6749 §4.4).
 
-    Pass the returned `access_token` as `Authorization: Bearer <token>` on all
-    protected endpoints (`/screen`, `/screen/batch`, `/sdn/refresh`).
+    Request must use `Content-Type: application/x-www-form-urlencoded`.
+
+    | Field | Value |
+    |-------|-------|
+    | `grant_type` | `client_credentials` |
+    | `client_id` | Your issued client ID |
+    | `client_secret` | Your client secret |
+    | `scope` | `ofac:screening` (optional, this is the default) |
+
+    Returns a signed Bearer access token valid for `expires_in` seconds.
+    Pass it on protected endpoints as `Authorization: Bearer <access_token>`.
     """
-    if req.api_key not in VALID_API_KEYS:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    token = create_access_token(subject="api-client")
-    return TokenResponse(
+    if grant_type != "client_credentials":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "unsupported_grant_type",
+                "error_description": "Only 'client_credentials' is supported",
+            },
+        )
+
+    authenticate_client(client_id, client_secret)
+
+    token = create_access_token(client_id=client_id, scope=scope)
+    return OAuthTokenResponse(
         access_token=token,
-        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        expires_in=TOKEN_EXPIRE_SECONDS,
+        scope=scope,
     )
 
 
@@ -95,6 +127,8 @@ def screen_identity(req: ScreeningRequest, _: dict = Depends(require_auth)) -> S
     """
     Screen a single identity against the OFAC SDN list.
 
+    Requires a valid OAuth 2.0 Bearer token (`Authorization: Bearer <token>`).
+
     Use the `algorithm` field to choose the similarity model. Thresholds are
     pre-calibrated per algorithm so effective sensitivity is consistent.
 
@@ -108,16 +142,16 @@ def screen_identity(req: ScreeningRequest, _: dict = Depends(require_auth)) -> S
     """
     match_threshold, review_threshold = ALGORITHM_THRESHOLDS[req.algorithm]
 
-    matches     = sdn_manager.screen(req)
-    top_score   = matches[0].score if matches else 0.0
-    request_id  = hashlib.sha256(
+    matches    = sdn_manager.screen(req)
+    top_score  = matches[0].score if matches else 0.0
+    request_id = hashlib.sha256(
         f"{req.full_name}{datetime.utcnow().isoformat()}".encode()
     ).hexdigest()[:16]
 
     if top_score >= match_threshold:
         decision = ScreeningDecision.BLOCKED
         message  = (
-            f"Identity matches OFAC SDN entry \'{matches[0].sdn_name}\' "
+            f"Identity matches OFAC SDN entry '{matches[0].sdn_name}' "
             f"(score {top_score:.2f}). Transaction must be blocked."
         )
     elif top_score >= review_threshold:
@@ -145,13 +179,19 @@ def screen_identity(req: ScreeningRequest, _: dict = Depends(require_auth)) -> S
 
 # ─── Batch Screening ──────────────────────────────────────────────────────────
 @app.post("/screen/batch", response_model=BatchScreeningResponse, tags=["Screening"])
-def screen_batch(req: BatchScreeningRequest, _: dict = Depends(require_auth)) -> BatchScreeningResponse:
+def screen_batch(req: BatchScreeningRequest, token_payload: dict = Depends(require_auth)) -> BatchScreeningResponse:
     """
     Screen up to 100 identities in a single request.
     Each subject is independently screened and returns its own decision.
+
+    Requires a valid OAuth 2.0 Bearer token (`Authorization: Bearer <token>`).
     """
     screened_at = datetime.utcnow()
-    results = [screen_identity(subject) for subject in req.subjects]
+    # Call the business logic directly (auth already verified above)
+    results = [
+        screen_identity(subject, _=token_payload)
+        for subject in req.subjects
+    ]
     return BatchScreeningResponse(
         screened_at = screened_at,
         total       = len(results),

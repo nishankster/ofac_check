@@ -6,7 +6,7 @@ The OFAC Screening API is a high-performance RESTful web service built with Fast
 
 - **Automated SDN List Management**: Automatically downloads and parses the latest OFAC SDN XML list.
 - **Pluggable Similarity Algorithms**: Choose between Jaro-Winkler, Levenshtein, or N-gram similarity per request. Each algorithm ships with pre-calibrated thresholds so screening sensitivity stays consistent regardless of choice.
-- **JWT Authentication**: All screening endpoints are protected by short-lived JWT Bearer tokens. Clients exchange a static API key for a token via `POST /auth/token`.
+- **OAuth 2.0 Authentication**: All screening endpoints are protected using the OAuth 2.0 Client Credentials flow (RFC 6749 §4.4) — the standard machine-to-machine authentication pattern.
 - **Detailed Match Reasons**: Identifies matches not only by name but also by Date of Birth (DOB), Nationality, and National IDs (e.g., Passport, SSN).
 - **Batch Processing**: Supports screening up to 100 identities in a single request.
 - **Background Refresh**: Exposes an endpoint to refresh the SDN list asynchronously without blocking ongoing screening requests.
@@ -16,49 +16,72 @@ The OFAC Screening API is a high-performance RESTful web service built with Fast
 
 ## Authentication
 
-All endpoints except `GET /health` require a **JWT Bearer token**. The token flow is:
+The API uses **OAuth 2.0 Client Credentials** (RFC 6749 §4.4) — the industry-standard flow for server-to-server API access. There are no user logins or redirect flows; your application exchanges a `client_id` + `client_secret` directly for a Bearer access token.
 
 ```
-Your API key  →  POST /auth/token  →  JWT (valid 60 min)  →  Authorization: Bearer <JWT>
+client_id + client_secret
+        │
+        ▼
+POST /oauth/token  ──►  access_token (Bearer JWT, valid 1 hour)
+                                │
+                                ▼
+            Authorization: Bearer <access_token>
+                    on all protected endpoints
 ```
 
-### Step 1 — Obtain a JWT token
+---
 
-Exchange your static API key for a short-lived JWT:
+### Step 1 — Obtain an access token
+
+Send a `POST` request to `/oauth/token` with `Content-Type: application/x-www-form-urlencoded`:
 
 ```bash
-curl -X POST https://your-api/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"api_key": "your-api-key"}'
+curl -X POST https://your-api/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=your-client-id&client_secret=your-client-secret"
 ```
 
 **Success response `200 OK`:**
 
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhcGktY2xpZW50IiwiaWF0IjoxNjk4MjQwMDAwLCJleHAiOjE2OTgyNDM2MDB9.abc123",
-  "token_type": "bearer",
-  "expires_in": 3600
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjb21wbGlhbmNlLXN5c3RlbSIsImlhdCI6MTY5ODI0MDAwMCwiZXhwIjoxNjk4MjQzNjAwLCJzY29wZSI6Im9mYWM6c2NyZWVuaW5nIn0.xyz",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "ofac:screening"
 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `access_token` | The JWT to include in every subsequent request |
-| `token_type` | Always `bearer` |
-| `expires_in` | Seconds until the token expires (default: 3600 = 60 min) |
+| `access_token` | Bearer token to include in all subsequent requests |
+| `token_type` | Always `Bearer` |
+| `expires_in` | Seconds until the token expires (default: 3600 = 1 hour) |
+| `scope` | Granted scopes; currently `ofac:screening` |
 
-**Error — invalid API key `401 Unauthorized`:**
+**Error — wrong credentials `401 Unauthorized`:**
 
 ```json
-{ "detail": "Invalid API key" }
+{
+  "error": "invalid_client",
+  "error_description": "Client authentication failed"
+}
+```
+
+**Error — wrong grant type `400 Bad Request`:**
+
+```json
+{
+  "error": "unsupported_grant_type",
+  "error_description": "Only 'client_credentials' is supported"
+}
 ```
 
 ---
 
 ### Step 2 — Call a protected endpoint
 
-Pass the token in the `Authorization` header as a **Bearer token**:
+Include the access token in the `Authorization` header as a Bearer token:
 
 ```bash
 TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
@@ -72,19 +95,19 @@ curl -X POST https://your-api/screen \
 **Error — missing token `401 Unauthorized`:**
 
 ```json
-{ "detail": "Not authenticated" }
+{ "error": "invalid_token", "error_description": "Not authenticated" }
 ```
 
 **Error — expired token `401 Unauthorized`:**
 
 ```json
-{ "detail": "Token has expired" }
+{ "error": "invalid_token", "error_description": "The access token has expired" }
 ```
 
 **Error — malformed token `401 Unauthorized`:**
 
 ```json
-{ "detail": "Invalid token" }
+{ "error": "invalid_token", "error_description": "The access token is invalid" }
 ```
 
 ---
@@ -92,15 +115,15 @@ curl -X POST https://your-api/screen \
 ### Token lifecycle
 
 ```
-t=0 min    Request token via POST /auth/token
+t=0 min    Call POST /oauth/token  →  receive access_token
 t=0 min    Use token on /screen, /screen/batch, /sdn/refresh
 ...
 t=59 min   Token still valid — continue using it
-t=60 min   Token expires — any request returns 401 "Token has expired"
-t=60 min   Request a fresh token via POST /auth/token and continue
+t=60 min   Token expires — requests return 401 "The access token has expired"
+t=60 min   Call POST /oauth/token again for a fresh token
 ```
 
-Re-request a token whenever you receive `401 Token has expired`. There is no refresh endpoint — simply call `/auth/token` again with your API key.
+There is no refresh token in the Client Credentials flow — simply re-authenticate when the token expires.
 
 ---
 
@@ -109,11 +132,19 @@ Re-request a token whenever you receive `401 Token has expired`. There is no ref
 ```python
 import requests
 
-BASE_URL = "https://your-api"
-API_KEY  = "your-api-key"
+BASE_URL      = "https://your-api"
+CLIENT_ID     = "compliance-system"
+CLIENT_SECRET = "your-client-secret"
 
-# 1. Get a token
-resp = requests.post(f"{BASE_URL}/auth/token", json={"api_key": API_KEY})
+# 1. Get an OAuth 2.0 access token
+resp = requests.post(
+    f"{BASE_URL}/oauth/token",
+    data={                          # form-encoded, not JSON
+        "grant_type":    "client_credentials",
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+    },
+)
 resp.raise_for_status()
 token = resp.json()["access_token"]
 
@@ -124,9 +155,9 @@ resp = requests.post(
     f"{BASE_URL}/screen",
     headers=headers,
     json={
-        "full_name": "Osama Bin Laden",
-        "date_of_birth": "1957-03-10",
-        "nationality": "SA",
+        "full_name":      "Osama Bin Laden",
+        "date_of_birth":  "1957-03-10",
+        "nationality":    "SA",
     },
 )
 resp.raise_for_status()
@@ -141,8 +172,8 @@ resp = requests.post(
     headers=headers,
     json={
         "subjects": [
-            {"full_name": "Alice Smith",    "reference_id": "ref-001"},
-            {"full_name": "Viktor Bout",    "reference_id": "ref-002", "algorithm": "ngram"},
+            {"full_name": "Alice Smith",  "reference_id": "ref-001"},
+            {"full_name": "Viktor Bout",  "reference_id": "ref-002", "algorithm": "ngram"},
         ]
     },
 )
@@ -155,13 +186,14 @@ for r in resp.json()["results"]:
 
 ### Using the Swagger UI
 
-The interactive API docs automatically handle the auth flow for you:
+The interactive API docs handle the auth flow for you:
 
 1. Open [http://localhost:8000/docs](http://localhost:8000/docs)
-2. Call `POST /auth/token` with your API key — copy the `access_token` from the response
-3. Click **Authorize** (lock icon, top-right)
-4. Enter `Bearer <paste-token-here>` in the **HTTPBearer** field and click **Authorize**
-5. All subsequent requests from the Swagger UI will include the token automatically
+2. Expand `POST /oauth/token` → **Try it out** → fill in `grant_type`, `client_id`, `client_secret` → **Execute**
+3. Copy the `access_token` value from the response
+4. Click **Authorize** (lock icon, top-right of the page)
+5. Enter `Bearer <paste-token-here>` in the **HTTPBearer** field → click **Authorize**
+6. All subsequent requests from Swagger will include the token automatically
 
 ---
 
@@ -170,25 +202,46 @@ The interactive API docs automatically handle the auth flow for you:
 ```bash
 # 1. Create your local env file
 cp .env.example .env
-# Edit .env — set JWT_SECRET_KEY (openssl rand -hex 32) and API_KEYS
+# Edit .env — set OAUTH_SIGNING_KEY and OAUTH_CLIENTS
+
+# Generate a signing key:
+# openssl rand -hex 32
 
 # 2. Build and start
 docker compose up --build
 
-# 3. Check health
+# 3. Check health (no auth required)
 curl http://localhost:8000/health
 
-# 4. Get a token
-curl -X POST http://localhost:8000/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"api_key": "your-key-from-env"}'
+# 4. Get an access token
+curl -X POST http://localhost:8000/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=replace-client-id&client_secret=replace-client-secret"
 
 # 5. Screen an identity
+TOKEN="<access_token from step 4>"
 curl -X POST http://localhost:8000/screen \
-  -H "Authorization: Bearer <token>" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"full_name": "Osama Bin Laden"}'
 ```
+
+---
+
+## Running Without Docker (bare Python)
+
+```bash
+pip install -r requirements.txt
+
+export OAUTH_SIGNING_KEY="$(openssl rand -hex 32)"
+export OAUTH_CLIENTS='{"dev-client":"dev-secret"}'
+
+uvicorn main:app --reload
+```
+
+Once running, the interactive API docs are at:
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
 
 ---
 
@@ -200,19 +253,23 @@ curl -X POST http://localhost:8000/screen \
 - Docker installed
 - An existing VPC with public and private subnets
 
-### 1. Deploy the CloudFormation stack
+### 1. Store secrets in AWS Secrets Manager
 
 ```bash
-# Create the secrets in Secrets Manager first
+# OAuth signing key
 aws secretsmanager create-secret \
-  --name ofac-api/jwt-secret-key \
+  --name ofac-api/oauth-signing-key \
   --secret-string "$(openssl rand -hex 32)"
 
+# OAuth clients (JSON: client_id → client_secret)
 aws secretsmanager create-secret \
-  --name ofac-api/api-keys \
-  --secret-string "key-abc123,key-def456"
+  --name ofac-api/oauth-clients \
+  --secret-string '{"compliance-system":"s3cr3t1","batch-runner":"s3cr3t2"}'
+```
 
-# Deploy the stack (replace parameter values for your environment)
+### 2. Deploy the CloudFormation stack
+
+```bash
 aws cloudformation deploy \
   --template-file deploy/cloudformation.yml \
   --stack-name ofac-api-production \
@@ -222,12 +279,12 @@ aws cloudformation deploy \
       VpcId=vpc-xxxxxxxx \
       PublicSubnetIds="subnet-aaa,subnet-bbb" \
       PrivateSubnetIds="subnet-ccc,subnet-ddd" \
-      JwtSecretArn=arn:aws:secretsmanager:REGION:ACCOUNT:secret:ofac-api/jwt-secret-key \
-      ApiKeysSecretArn=arn:aws:secretsmanager:REGION:ACCOUNT:secret:ofac-api/api-keys \
+      OAuthSigningKeyArn=arn:aws:secretsmanager:REGION:ACCOUNT:secret:ofac-api/oauth-signing-key \
+      OAuthClientsArn=arn:aws:secretsmanager:REGION:ACCOUNT:secret:ofac-api/oauth-clients \
       ImageUri=ACCOUNT.dkr.ecr.REGION.amazonaws.com/ofac-screening-api:latest
 ```
 
-### 2. Build, push, and deploy
+### 3. Build, push, and deploy
 
 ```bash
 ./deploy/deploy.sh --env production --region us-east-1
@@ -243,16 +300,17 @@ The script:
 
 ```
 Internet → ALB (HTTP→HTTPS redirect) → ECS Fargate tasks (private subnets)
-                                        ↕
-                              AWS Secrets Manager (JWT key, API keys)
-                                        ↕
-                              CloudWatch Logs (/ecs/ofac-screening-api)
+                                              ↕
+                                   AWS Secrets Manager
+                                   (OAUTH_SIGNING_KEY, OAUTH_CLIENTS)
+                                              ↕
+                                   CloudWatch Logs (/ecs/ofac-screening-api)
 ```
 
 - **Fargate** — serverless containers, no EC2 management
 - **Auto Scaling** — scales 2→10 tasks on CPU > 70%
 - **Deployment circuit breaker** — automatically rolls back failed deployments
-- **Secrets Manager** — JWT secret key and API keys injected as env vars at runtime (never baked into the image)
+- **Secrets Manager** — OAuth signing key and client registry injected as env vars at task start (never baked into the image)
 - **Health check grace period** — 120 s to allow the SDN XML to download on cold start
 
 ---
@@ -303,34 +361,32 @@ Thresholds are pre-calibrated per algorithm so that effective screening sensitiv
 
 ## API Endpoints
 
-| Endpoint | Method | Auth required |
-|----------|--------|---------------|
-| `/health` | GET | No — public (used by ALB health checks) |
-| `/auth/token` | POST | No — this is where you obtain a token |
-| `/screen` | POST | **Yes** — Bearer JWT |
-| `/screen/batch` | POST | **Yes** — Bearer JWT |
-| `/sdn/refresh` | GET | **Yes** — Bearer JWT |
+| Endpoint | Method | Auth |
+|----------|--------|------|
+| `/oauth/token` | POST | Public — form-encoded client credentials |
+| `/health` | GET | Public — used by ALB health checks |
+| `/screen` | POST | Bearer token required |
+| `/screen/batch` | POST | Bearer token required |
+| `/sdn/refresh` | GET | Bearer token required |
 
 ---
 
-### 1. Get Token
-`POST /auth/token` — **Public**
+### 1. Get Access Token
+`POST /oauth/token` — **Public** — `Content-Type: application/x-www-form-urlencoded`
 
-Exchange a static API key for a short-lived JWT Bearer token.
-
-**Request:**
 ```bash
-curl -X POST https://your-api/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"api_key": "your-api-key"}'
+curl -X POST https://your-api/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET"
 ```
 
 **Response `200 OK`:**
 ```json
 {
   "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "bearer",
-  "expires_in": 3600
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "ofac:screening"
 }
 ```
 
@@ -339,9 +395,6 @@ curl -X POST https://your-api/auth/token \
 ### 2. Health Check
 `GET /health` — **Public**
 
-Returns the system health, including the current count of loaded SDN entries and the publication date of the list in use.
-
-**Request:**
 ```bash
 curl https://your-api/health
 ```
@@ -359,11 +412,8 @@ curl https://your-api/health
 ---
 
 ### 3. Screen Single Identity
-`POST /screen` — **Requires Bearer JWT**
+`POST /screen` — **Requires Bearer token**
 
-Screens a single identity (individual or entity) against the loaded SDN list.
-
-**Request:**
 ```bash
 curl -X POST https://your-api/screen \
   -H "Authorization: Bearer $TOKEN" \
@@ -375,14 +425,7 @@ curl -X POST https://your-api/screen \
     "nationality": "US",
     "national_id": "123456789",
     "reference_id": "txn-987654321",
-    "algorithm": "jaro_winkler",
-    "address": {
-      "street": "123 Main St",
-      "city": "New York",
-      "state": "NY",
-      "country": "US",
-      "postal_code": "10001"
-    }
+    "algorithm": "jaro_winkler"
   }'
 ```
 
@@ -401,97 +444,32 @@ curl -X POST https://your-api/screen \
 }
 ```
 
-**Response when a match is found:**
-```json
-{
-  "request_id": "b2c3d4e5f6g7h8i9",
-  "reference_id": "txn-111222333",
-  "screened_at": "2023-10-25T14:36:00.123Z",
-  "decision": "BLOCKED",
-  "score": 0.9712,
-  "matches": [
-    {
-      "sdn_name": "osama bin laden",
-      "sdn_type": "Individual",
-      "sdn_program": "SDGT",
-      "score": 0.9712,
-      "match_reason": "Name similarity 0.97"
-    }
-  ],
-  "message": "Identity matches OFAC SDN entry 'osama bin laden' (score 0.97). Transaction must be blocked.",
-  "algorithm": "jaro_winkler",
-  "sdn_list_date": "10/18/2023"
-}
-```
-
 ---
 
 ### 4. Batch Screening
-`POST /screen/batch` — **Requires Bearer JWT**
+`POST /screen/batch` — **Requires Bearer token**
 
-Screens up to 100 subjects in a single request. Each subject is screened independently and may specify a different algorithm.
+Screens up to 100 subjects. Each subject is screened independently and may specify a different algorithm.
 
-**Request:**
 ```bash
 curl -X POST https://your-api/screen/batch \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "subjects": [
-      {
-        "full_name": "Alice Smith",
-        "reference_id": "ref-001",
-        "algorithm": "jaro_winkler"
-      },
-      {
-        "full_name": "Bob Jones",
-        "reference_id": "ref-002",
-        "algorithm": "ngram"
-      }
+      {"full_name": "Alice Smith", "reference_id": "ref-001"},
+      {"full_name": "Viktor Bout", "reference_id": "ref-002", "algorithm": "ngram"}
     ]
   }'
-```
-
-**Response `200 OK`:**
-```json
-{
-  "screened_at": "2023-10-25T14:40:00.123Z",
-  "total": 2,
-  "results": [
-    {
-      "request_id": "b1b2...",
-      "reference_id": "ref-001",
-      "screened_at": "2023-10-25T14:40:00.123Z",
-      "decision": "CLEAR",
-      "score": 0.32,
-      "matches": [],
-      "message": "No OFAC SDN match found. Identity cleared.",
-      "algorithm": "jaro_winkler",
-      "sdn_list_date": "10/18/2023"
-    },
-    {
-      "request_id": "c2c3...",
-      "reference_id": "ref-002",
-      "screened_at": "2023-10-25T14:40:00.123Z",
-      "decision": "CLEAR",
-      "score": 0.41,
-      "matches": [],
-      "message": "No OFAC SDN match found. Identity cleared.",
-      "algorithm": "ngram",
-      "sdn_list_date": "10/18/2023"
-    }
-  ]
-}
 ```
 
 ---
 
 ### 5. Refresh SDN List
-`GET /sdn/refresh` — **Requires Bearer JWT**
+`GET /sdn/refresh` — **Requires Bearer token**
 
-Triggers a background task to re-download and parse the latest OFAC SDN list from the Treasury website. Returns immediately; the reload happens asynchronously.
+Triggers a background re-download of the OFAC SDN list. Returns immediately.
 
-**Request:**
 ```bash
 curl -X GET https://your-api/sdn/refresh \
   -H "Authorization: Bearer $TOKEN"
@@ -499,9 +477,7 @@ curl -X GET https://your-api/sdn/refresh \
 
 **Response `200 OK`:**
 ```json
-{
-  "message": "SDN list refresh initiated in background."
-}
+{ "message": "SDN list refresh initiated in background." }
 ```
 
 ---
@@ -518,17 +494,23 @@ curl -X GET https://your-api/sdn/refresh \
 | `national_id` | `str` | Passport, SSN, or government-issued ID number. | No |
 | `address` | `Address` | Address object (street, city, state, country, postal_code). | No |
 | `reference_id` | `str` | Your internal transaction or customer reference ID. | No |
-| `algorithm` | `str` | Similarity algorithm: `jaro_winkler` (default), `levenshtein`, or `ngram`. | No |
+| `algorithm` | `str` | `jaro_winkler` (default), `levenshtein`, or `ngram`. | No |
+
+### `OAuthTokenResponse`
+| Field | Type | Description |
+|-------|------|-------------|
+| `access_token` | `str` | Bearer token for use on protected endpoints. |
+| `token_type` | `str` | Always `Bearer`. |
+| `expires_in` | `int` | Token lifetime in seconds. |
+| `scope` | `str` | Granted scopes (e.g. `ofac:screening`). |
 
 ### `MatchDetail`
-When a match is found above the review threshold, it is returned in the `matches` array. Up to the top 5 matches are returned.
-
 | Field | Type | Description |
 |-------|------|-------------|
 | `sdn_name` | `str` | Name of the entity on the SDN list. |
 | `sdn_type` | `str` | Type of entity on the SDN list. |
 | `sdn_program` | `str` | Sanction programs the entity is associated with. |
-| `score` | `float` | Similarity score (0–1); interpretation depends on algorithm used. |
+| `score` | `float` | Similarity score (0–1); scale depends on algorithm used. |
 | `match_reason` | `str` | Reasons for the match (e.g., Name similarity, ID number match, DOB match). |
 
 ### `ScreeningResponse`
@@ -543,20 +525,3 @@ When a match is found above the review threshold, it is returned in the `matches
 | `message` | `str` | Human-readable explanation of the decision. |
 | `algorithm` | `str` | Algorithm used to compute similarity scores. |
 | `sdn_list_date` | `str` | Publication date of the SDN list used for this screening. |
-
----
-
-## Running Without Docker (bare Python)
-
-```bash
-pip install -r requirements.txt
-
-export JWT_SECRET_KEY="$(openssl rand -hex 32)"
-export API_KEYS="dev-key-1"
-
-uvicorn main:app --reload
-```
-
-Once running, the interactive API docs are at:
-- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
