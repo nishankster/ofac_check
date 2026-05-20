@@ -19,18 +19,18 @@
       ],
       "secrets": [
         {
-          "name": "JWT_SECRET_KEY",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ofac-api/jwt-secret-key"
+          "name": "OAUTH_SIGNING_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ofac-api/oauth-signing-key"
         },
         {
-          "name": "API_KEYS",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ofac-api/api-keys"
+          "name": "OAUTH_CLIENTS",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ofac-api/oauth-clients"
         }
       ],
       "environment": [
         {
-          "name": "JWT_EXPIRE_MINUTES",
-          "value": "60"
+          "name": "OAUTH_TOKEN_EXPIRE_SECONDS",
+          "value": "3600"
         }
       ],
       "logConfiguration": {

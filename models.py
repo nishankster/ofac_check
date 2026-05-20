@@ -83,11 +83,9 @@ class BatchScreeningResponse(BaseModel):
     results:     list[ScreeningResponse]
 
 
-class TokenRequest(BaseModel):
-    api_key: str = Field(..., description="API key issued by your platform administrator")
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type:   str = "bearer"
-    expires_in:   int = Field(..., description="Token validity in seconds")
+class OAuthTokenResponse(BaseModel):
+    """RFC 6749 §5.1 successful token response."""
+    access_token: str  = Field(..., description="Bearer token to use on protected endpoints")
+    token_type:   str  = Field("Bearer", description="Always 'Bearer'")
+    expires_in:   int  = Field(..., description="Token lifetime in seconds")
+    scope:        str  = Field("ofac:screening", description="Space-separated granted scopes")

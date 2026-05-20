@@ -31,22 +31,23 @@ Parameters:
     Default: 2
     Description: Number of ECS tasks to run.
 
-  JwtSecretArn:
+  OAuthSigningKeyArn:
     Type: String
     Description: >
-      ARN of the Secrets Manager secret containing JWT_SECRET_KEY
-      (plain-text secret value, not JSON).
+      ARN of the Secrets Manager secret containing OAUTH_SIGNING_KEY
+      (plain-text hex string; generate with: openssl rand -hex 32).
 
-  ApiKeysSecretArn:
+  OAuthClientsArn:
     Type: String
     Description: >
-      ARN of the Secrets Manager secret containing the comma-separated API_KEYS
-      (plain-text secret value, not JSON).
+      ARN of the Secrets Manager secret containing OAUTH_CLIENTS
+      (JSON object mapping client_id to client_secret,
+      e.g. {"compliance-system":"s3cr3t","batch-runner":"p4ssw0rd"}).
 
-  JwtExpireMinutes:
+  OAuthTokenExpireSeconds:
     Type: Number
-    Default: 60
-    Description: JWT token lifetime in minutes.
+    Default: 3600
+    Description: OAuth access token lifetime in seconds (default: 3600 = 1 hour).
 
   CertificateArn:
     Type: String
@@ -117,8 +118,8 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
-                  - !Ref JwtSecretArn
-                  - !Ref ApiKeysSecretArn
+                  - !Ref OAuthSigningKeyArn
+                  - !Ref OAuthClientsArn
 
   # ── IAM: Task Role (runtime permissions for the application process itself) ─
   TaskRole:
@@ -252,13 +253,13 @@ Resources:
             - ContainerPort: 8000
               Protocol: tcp
           Secrets:
-            - Name: JWT_SECRET_KEY
-              ValueFrom: !Ref JwtSecretArn
-            - Name: API_KEYS
-              ValueFrom: !Ref ApiKeysSecretArn
+            - Name: OAUTH_SIGNING_KEY
+              ValueFrom: !Ref OAuthSigningKeyArn
+            - Name: OAUTH_CLIENTS
+              ValueFrom: !Ref OAuthClientsArn
           Environment:
-            - Name: JWT_EXPIRE_MINUTES
-              Value: !Sub "${JwtExpireMinutes}"
+            - Name: OAUTH_TOKEN_EXPIRE_SECONDS
+              Value: !Sub "${OAuthTokenExpireSeconds}"
           LogConfiguration:
             LogDriver: awslogs
             Options:

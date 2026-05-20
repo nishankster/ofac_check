@@ -9,7 +9,7 @@ services:
     env_file:
       - .env          # copy .env.example → .env and fill in values
     environment:
-      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
+      OAUTH_TOKEN_EXPIRE_SECONDS: ${OAUTH_TOKEN_EXPIRE_SECONDS:-3600}
     volumes:
       # Persist the downloaded SDN XML across container restarts so you don't
       # re-download the ~27 MB file every time you restart locally.
