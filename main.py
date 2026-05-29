@@ -102,6 +102,15 @@ def oauth_token(
 # ─── Health ───────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["System"])
 def health():
+    if sdn_manager.entry_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status": "degraded",
+                "reason": "SDN list not loaded — screening is unavailable",
+                "sdn_entries": 0,
+            },
+        )
     return {
         "status": "ok",
         "sdn_entries": sdn_manager.entry_count,
@@ -124,6 +133,11 @@ def refresh_sdn(background_tasks: BackgroundTasks, _: dict = Depends(require_aut
 # ─── Single Screening ─────────────────────────────────────────────────────────
 @app.post("/screen", response_model=ScreeningResponse, tags=["Screening"])
 def screen_identity(req: ScreeningRequest, _: dict = Depends(require_auth)) -> ScreeningResponse:
+    if sdn_manager.entry_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SDN list not loaded — screening is unavailable. Check /health for status.",
+        )
     """
     Screen a single identity against the OFAC SDN list.
 

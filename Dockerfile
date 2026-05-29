@@ -12,14 +12,19 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Non-root user — never run the API as root in production
+# chown /app so the ofac user can write updated cache files (e.g. sdn_cache.xml on refresh)
 RUN addgroup --system --gid 1001 ofac \
- && adduser  --system --uid 1001 --gid 1001 --no-create-home ofac
+ && adduser  --system --uid 1001 --gid 1001 --no-create-home ofac \
+ && chown ofac:ofac /app
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
 # Copy application source
 COPY --chown=ofac:ofac auth.py main.py models.py sdn_manager.py utils.py ./
+
+# Bake in the current SDN cache so the API works even if treasury.gov is unreachable at startup
+COPY --chown=ofac:ofac sdn_cache.xml ./
 
 USER ofac
 

@@ -136,7 +136,7 @@ class SDNListManager:
         log.info(f"Downloading SDN list from {url} …")
         try:
             req = Request(url, headers={"User-Agent": "OFAC-Screening-API/1.0"})
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=180) as resp:
                 data = resp.read()
             cache_path.write_bytes(data)
             log.info(f"Downloaded {len(data):,} bytes → {cache_path}")
