@@ -5,4 +5,4 @@ REMEDIATION_CHECKLIST.md
 /cache
 /.venv
 /.claude
-/__pycache__
+/__pycache__.env
